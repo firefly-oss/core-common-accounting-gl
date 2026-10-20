@@ -52,7 +52,7 @@ import org.springframework.web.reactive.config.EnableWebFlux;
         ),
         servers = {
                 @Server(
-                        url = "http://core.getfirefly.io/general-ledger",
+                        url = "https://openplatform.fireflysoftware.io/general-ledger",
                         description = "Development Environment"
                 ),
                 @Server(
