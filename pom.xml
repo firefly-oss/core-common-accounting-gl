@@ -12,6 +12,7 @@
     </parent>
 
     <artifactId>core-common-accounting-gl</artifactId>
+    <name>core-common-accounting-gl</name>
     <packaging>pom</packaging>
     <modules>
         <module>core-common-accounting-gl-web</module>

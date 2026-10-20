@@ -10,6 +10,7 @@
     </parent>
 
     <artifactId>core-common-accounting-gl-web</artifactId>
+    <name>core-common-accounting-gl-web</name>
 
     <properties>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
