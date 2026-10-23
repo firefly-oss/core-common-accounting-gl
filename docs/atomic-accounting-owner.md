@@ -20,7 +20,17 @@ A journal is bounded to50 entries,500 lines, and32 currency representations. Eve
 
 The native schema requires one immutable action/intent receipt, its complete posting and lines, and both audit and outbox records in the same PostgreSQL transaction. Completion checks bind all rows to the action's transaction ID. A later transaction cannot append lines or events to complete or extend an already committed receipt. Book-local sequences are checked increments; missing outbox or incomplete balance rolls back the counter and the entire effect.
 
-A reversal is a new immutable exact opposite journal with a unique original-posting reference. It requires current authority, active admissions, and an explicitly authorized OPEN adjustment period. The original journal remains retained. No-effect closure has no posting and is admitted only at or after the ledger's authoritative deadline; its eventual public reconciliation contract must bind the complete original intent.
+A reversal must be a new immutable exact opposite journal with a unique original-posting reference, current authority, active admissions, and an explicitly authorized OPEN adjustment period. The original journal stays retained. New REVERSE actions remain closed until their complete versioned original-reference/reason contract and vectors are implemented; the earlier SQL protocol is not a public reversal capability. No-effect closure has no posting and is admitted only at or after the ledger's authoritative deadline. Its stored request already binds the complete original posting intent; the public reconciliation command is still pending.
+
+## Complete original request and economic rows
+
+New POST and ABSENT_CLOSED actions require the closed GL_POSTING_REQUEST_V1 original request. The owner retains the exact first JSON text, the full GL_POSTING_INTENT_V1 canonical bytes, and the separate economic bytes and source identity. JSON object formatting and escapes may differ without changing semantic intent. Entry and line keys must already be strictly ordered; the owner never silently sorts an unauthorized body into an approved request.
+
+The byte decoder rejects malformed UTF-8 before replacement decoding. Java and PostgreSQL agree on scalar Unicode, UTF-16 field limits, UTF-8 canonical lengths, exact integer tokens, UTC bounds, money strings, and every required field. The database validates raw unique JSON keys before using a generated JSONB lookup representation. Unknown, missing, null, escaped duplicate, fractional, exponential, overflowing, and noncanonical integer forms cannot disappear through normalization.
+
+The insert guard binds the exact tenant/book/action, source key, deadline, account set, canonical bytes and digests. A new POST is logically admitted only when its action INSERT has acquired the actual book, period, distinct sorted account and distinct sorted currency row gates, validated their retained references and versions, and passed the final PostgreSQL-clock deadline and current-authority check. A gate wait that crosses the original cutoff cannot create a new posting. The nondeferred admission trigger holds those locks through transaction end; an action statement admitted before cutoff may finish its economic rows and commit afterward. Deferred completeness does not introduce a second request cutoff at commit. Exact native action authority is checked before helper-visible gate access and again after waits. ABSENT_CLOSED retains its dedicated postdeadline reconciliation authority without requiring active financial admissions. Deferred same-transaction checks bind every actual posting header, entry, line, expected version, currency-policy reference, amount, side, memo and row count to that original body. A balanced journal with the same totals but different row membership or account signs is refused. Physical SQL insertion order does not redefine the logical approved sequence. Audit/outbox failure or an outer transaction error rolls back all effects.
+
+Actions created by the earlier foundation protocol remain explicitly GL_FOUNDATION_V1 with no invented original body. Migration preserves their bytes and immutable history. They are unverified foundation records, not complete approved financial proof, and new inserts cannot choose that shape. A future native service must refuse to treat those rows as an authoritative FOUND financial observation without an explicit reviewed migration.
 
 ## Current authority before transactions
 
@@ -52,7 +62,7 @@ Scoped policies distinguish the following access:
 
 | Operation | Admitted access |
 | --- | --- |
-| POST / REVERSE | Exact current action, intent, principal, tenant/book and authorized accounts; immutable financial rows plus checked sequence and required events. |
+| POST | Exact current action, complete intent, principal, tenant/book and authorized accounts; immutable financial rows plus checked sequence and required events. New REVERSE actions remain closed pending their versioned complete contract. |
 | RECONCILE | Retained authorized observation and an audited no-effect action; no journal-header/line/sequence writes and no administrative controls. |
 | READ / HISTORY | Whole financial receipt/history requires current authority for every account in that receipt. |
 | BALANCES | Exact authorized account lines for later bounded account projections; no inferred book-wide financial authority. |

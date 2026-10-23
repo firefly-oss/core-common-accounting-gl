@@ -124,13 +124,13 @@ public final class GlAccountingDatabaseContext {
                                                           FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace
                                                           JOIN pg_catalog.pg_roles o ON o.oid=p.proowner WHERE n.nspname='public' AND p.proname IN
                                                           ('gl_native_account_enrollment_guard','gl_native_legacy_account_guard','gl_native_legacy_line_guard',
-                                                           'gl_native_period_guard','gl_native_legacy_chart_visible','gl_native_sequence_complete','gl_native_journal_complete','gl_native_action_visible','gl_native_discover_posting_accounts'))
+                                                           'gl_native_period_guard','gl_native_legacy_chart_visible','gl_native_sequence_complete','gl_native_journal_complete','gl_native_action_visible','gl_native_discover_posting_accounts','gl_native_intent_rows_complete_v1'))
                                                         SELECT NOT r.rolsuper AND NOT r.rolbypassrls AND NOT r.rolcreaterole AND NOT r.rolcreatedb
                                                           AND NOT pg_catalog.has_schema_privilege(current_user,'public','CREATE')
                                                           AND NOT pg_catalog.pg_has_role(current_user,'gl_native_guard','MEMBER')
                                                           AND (SELECT count(*)=12 AND bool_and(relrowsecurity AND relforcerowsecurity
                                                             AND NOT pg_catalog.pg_has_role(current_user,relowner,'MEMBER')) FROM relations)
-                                                          AND (SELECT count(*)=9 AND bool_and(prosecdef AND NOT rolsuper AND NOT rolbypassrls
+                                                          AND (SELECT count(*)=10 AND bool_and(prosecdef AND NOT rolsuper AND NOT rolbypassrls
                                                             AND NOT rolcanlogin AND NOT rolcreaterole AND NOT rolcreatedb AND NOT rolinherit
                                                             AND proconfig @> ARRAY['search_path=pg_catalog, public, pg_temp']) FROM helpers)
                                                           AND :until>floor(extract(epoch FROM clock_timestamp())*1000)::bigint AS allowed

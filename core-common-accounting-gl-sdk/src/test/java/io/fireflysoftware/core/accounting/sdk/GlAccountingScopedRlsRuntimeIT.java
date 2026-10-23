@@ -22,6 +22,7 @@ import static io.fireflysoftware.core.accounting.sdk.GlNativeJournalAtomicSchema
 import static org.assertj.core.api.Assertions.*;
 
 import io.fireflysoftware.core.accounting.core.services.posting.v1.*;
+import io.fireflysoftware.core.accounting.intefaces.dtos.posting.v1.*;
 import io.r2dbc.pool.*;
 import io.r2dbc.postgresql.*;
 
@@ -114,14 +115,15 @@ class GlAccountingScopedRlsRuntimeIT {
     record Data(Fixture fixture, Effect effect) {}
 
     static Data data() throws Exception {
-        try (var c = ownerConnection()) {
-            var fixture = fixture(c);
-            var effect = effect(c, false);
-            c.setAutoCommit(false);
-            complete(c, fixture, effect, 1, null, "12500");
-            c.commit();
-            return new Data(fixture, effect);
-        }
+        var fixture = emptyFixture();
+        var effect = scopedEffect(fixture, false);
+        var admitted = write(fixture, effect, "post");
+        transactions
+                .execute(
+                        admitted,
+                        () -> executeCommands(capturedUnchecked(fixture, effect), admitted))
+                .block();
+        return new Data(fixture, effect);
     }
 
     static GlAccountingAuthority authority(Fixture f) {
@@ -458,7 +460,7 @@ class GlAccountingScopedRlsRuntimeIT {
                                     if (method.getName().equals("close")) return null;
                                     throw new UnsupportedOperationException(
                                             "Private SQL capture supports createStatement/close"
-                                                + " only");
+                                                    + " only");
                                 });
         fixture.run(connection);
         return commands.stream()
@@ -477,28 +479,12 @@ class GlAccountingScopedRlsRuntimeIT {
     }
 
     static Effect scopedEffect(Fixture f, boolean due) throws Exception {
+        return scopedEffect(f, due, "12500");
+    }
+
+    static Effect scopedEffect(Fixture f, boolean due, String amount) throws Exception {
         try (var c = ownerConnection()) {
-            var base = effect(c, due);
-            var canonical =
-                    GlPostingRules.canonical(
-                            "GL_POSTING_INTENT_V1",
-                            List.of(
-                                    f.scope().tenant().toString(),
-                                    f.scope().book().toString(),
-                                    base.action().toString(),
-                                    base.deadline() + "",
-                                    f.period().toString(),
-                                    f.mapping().toString(),
-                                    f.debit().toString(),
-                                    f.credit().toString(),
-                                    "SYNTHETIC_PRIVATE_POLICY_FIXTURE"));
-            return new Effect(
-                    base.action(),
-                    base.posting(),
-                    base.receipt(),
-                    base.sourceKey(),
-                    canonical,
-                    base.deadline());
+            return completeIntentEffect(c, f, due, amount);
         }
     }
 
@@ -574,7 +560,7 @@ class GlAccountingScopedRlsRuntimeIT {
     void currentPostContextCommitsCompleteJournalAndMissingOutboxRollsEverythingBack()
             throws Exception {
         var f = emptyFixture();
-        var effect = scopedEffect(f, false);
+        var effect = scopedEffect(f, false, "9007199254740993");
         var admitted = write(f, effect, "post");
         var commands = captured(c -> complete(c, f, effect, 1, null, "9007199254740993"));
         assertThat(
@@ -619,7 +605,7 @@ class GlAccountingScopedRlsRuntimeIT {
                     var rows =
                             st.executeQuery(
                                     "SELECT last_sequence FROM gl_native_book_sequence WHERE"
-                                        + " book_id='"
+                                            + " book_id='"
                                             + rollbackFixture.scope().book()
                                             + "'")) {
                 assertThat(rows.next()).isTrue();
@@ -665,5 +651,454 @@ class GlAccountingScopedRlsRuntimeIT {
             assertThat(count(c, "gl_native_posting", f.scope().book())).isZero();
             assertThat(count(c, "gl_native_journal_event", f.scope().book())).isEqualTo(2);
         }
+    }
+
+    @Test
+    void balancedEconomicRowsDifferentFromTheApprovedFullIntentCannotCommit() throws Exception {
+        var f = emptyFixture();
+        var effect = scopedEffect(f, false, "2");
+        var admitted = write(f, effect, "post");
+        var commands = captured(c -> complete(c, f, effect, 1, null, "1"));
+        assertThatThrownBy(
+                        () ->
+                                transactions
+                                        .execute(
+                                                admitted, () -> executeCommands(commands, admitted))
+                                        .block(Duration.ofSeconds(5)))
+                .isInstanceOf(org.springframework.dao.DataAccessException.class)
+                .satisfies(
+                        error -> {
+                            Throwable cause = error;
+                            while (cause.getCause() != null) cause = cause.getCause();
+                            assertThat(cause).isInstanceOf(io.r2dbc.spi.R2dbcException.class);
+                            assertThat(((io.r2dbc.spi.R2dbcException) cause).getSqlState())
+                                    .isEqualTo("23514");
+                            assertThat(cause.getMessage()).contains("GL_NATIVE_INTENT:");
+                        });
+        try (var c = ownerConnection()) {
+            for (var table :
+                    List.of(
+                            "gl_native_journal_action",
+                            "gl_native_posting",
+                            "gl_native_entry",
+                            "gl_native_line",
+                            "gl_native_journal_event"))
+                assertThat(count(c, table, f.scope().book())).isZero();
+        }
+    }
+
+    static void intentRejected(
+            Fixture f, GlAccountingAuthority.Admission admitted, List<String> commands)
+            throws Exception {
+        intentRejected(f, admitted, commands, "GL_NATIVE_INTENT:");
+    }
+
+    static void intentRejected(
+            Fixture f, GlAccountingAuthority.Admission admitted, List<String> commands,
+            String expectedDiagnostic)
+            throws Exception {
+        assertThatThrownBy(
+                        () ->
+                                transactions
+                                        .execute(
+                                                admitted, () -> executeCommands(commands, admitted))
+                                        .block(Duration.ofSeconds(10)))
+                .isInstanceOf(org.springframework.dao.DataAccessException.class)
+                .satisfies(
+                        error -> {
+                            Throwable cause = error;
+                            while (cause.getCause() != null) cause = cause.getCause();
+                            assertThat(cause).isInstanceOf(io.r2dbc.spi.R2dbcException.class);
+                            assertThat(((io.r2dbc.spi.R2dbcException) cause).getSqlState())
+                                    .isEqualTo("23514");
+                            assertThat(cause.getMessage()).contains(expectedDiagnostic);
+                        });
+        try (var c = ownerConnection()) {
+            for (var table :
+                    List.of(
+                            "gl_native_journal_action",
+                            "gl_native_posting",
+                            "gl_native_entry",
+                            "gl_native_line",
+                            "gl_native_journal_event"))
+                assertThat(count(c, table, f.scope().book())).isZero();
+        }
+    }
+
+    static Effect changedOriginal(
+            Fixture f,
+            Effect effect,
+            java.util.function.Consumer<com.fasterxml.jackson.databind.node.ObjectNode> change)
+            throws Exception {
+        var json = com.fasterxml.jackson.databind.json.JsonMapper.builder().build();
+        var body =
+                (com.fasterxml.jackson.databind.node.ObjectNode)
+                        json.readTree(effect.originalRequest());
+        change.accept(body);
+        var original = json.writeValueAsString(body);
+        var approved =
+                GlPostingIntentCodec.decode(
+                                f.scope().tenant().toString(),
+                                f.scope().book().toString(),
+                                original)
+                        .validated();
+        return new Effect(
+                effect.action(),
+                effect.posting(),
+                effect.receipt(),
+                approved.sourceClaimKey(),
+                approved.canonicalIntent(),
+                effect.deadline(),
+                original);
+    }
+
+    @Test
+    void sameTotalSwappedMembershipAndHeaderOrMemoChangesCannotCommit() throws Exception {
+        var mutations =
+                List.<java.util.function.UnaryOperator<String>>of(
+                        sql -> sql.replace("'Synthetic line'", "'Unapproved different memo'"),
+                        sql ->
+                                sql.replace(
+                                        "'Synthetic complete journal'",
+                                        "'Unapproved different entry'"),
+                        sql -> sql.replace("'2026-10-21'", "'2026-10-22'"),
+                        sql -> sql.replace("'line-1'", "'unapproved-line'"),
+                        sql -> sql.replace("'entry-1'", "'unapproved-entry'"),
+                        sql ->
+                                sql.replace(",'DR','", ",'TEMP','")
+                                        .replace(",'CR','", ",'DR','")
+                                        .replace(",'TEMP','", ",'CR','"));
+        for (var mutation : mutations) {
+            var f = emptyFixture();
+            var effect = scopedEffect(f, false);
+            var admitted = write(f, effect, "post");
+            var commands =
+                    captured(c -> complete(c, f, effect, 1, null, "12500")).stream()
+                            .map(mutation)
+                            .toList();
+            intentRejected(f, admitted, commands);
+        }
+    }
+
+    @Test
+    void everyFullCurrencyReferenceFieldMustMatchTheAdmittedImmutableRepresentation()
+            throws Exception {
+        for (var key : List.of("policyId", "currencyId", "isoCode", "version")) {
+            var f = emptyFixture();
+            var alternate = UUID.randomUUID().toString();
+            var effect =
+                    changedOriginal(
+                            f,
+                            scopedEffect(f, false),
+                            body -> {
+                                for (var line : body.get("entries").get(0).get("lines")) {
+                                    var currency =
+                                            (com.fasterxml.jackson.databind.node.ObjectNode)
+                                                    line.get("currency");
+                                    if (key.equals("version")) currency.put(key, 2L);
+                                    else
+                                        currency.put(
+                                                key, key.equals("isoCode") ? "EUR" : alternate);
+                                }
+                            });
+            var selected = effect;
+            var admitted = write(f, effect, "post");
+            intentRejected(f, admitted, captured(c -> complete(c, f, selected, 1, null, "12500")),
+                    "GL_NATIVE_ADMISSION: active exact retained currency required");
+        }
+    }
+
+    @Test
+    void originalBodySourceIdentityAndRawEscapedDuplicateKeysCannotChangeUnderAnApprovedDigest()
+            throws Exception {
+        for (var kind : List.of("description", "source-key", "duplicate")) {
+            var f = emptyFixture();
+            var effect = scopedEffect(f, false);
+            var admitted = write(f, effect, "post");
+            var original = effect.originalRequest();
+            String replacement;
+            if (kind.equals("description"))
+                replacement =
+                        original.replace(
+                                "Approved exact synthetic journal", "Unapproved replacement");
+            else if (kind.equals("duplicate"))
+                replacement =
+                        original.replace(
+                                "\"expectedBookVersion\":1",
+                                "\"expectedBookVersion\":1,\""
+                                        + (char) 92
+                                        + "u0065xpectedBookVersion\":1");
+            else replacement = original;
+            var commands =
+                    captured(c -> complete(c, f, effect, 1, null, "12500")).stream()
+                            .map(
+                                    sql ->
+                                            kind.equals("source-key")
+                                                    ? sql.replace(
+                                                            "'" + effect.sourceKey() + "'",
+                                                            "'" + "f".repeat(64) + "'")
+                                                    : sql.replace(
+                                                            "'" + original.replace("'", "''") + "'",
+                                                            "'"
+                                                                    + replacement.replace("'", "''")
+                                                                    + "'"))
+                            .toList();
+            intentRejected(f, admitted, commands);
+        }
+    }
+
+    @Test
+    void physicalInsertionOrderDoesNotChangeTheApprovedLogicalSequenceAndOuterErrorRollsBack()
+            throws Exception {
+        var f = emptyFixture();
+        var effect = scopedEffect(f, false);
+        var admitted = write(f, effect, "post");
+        var commands = new ArrayList<>(captured(c -> complete(c, f, effect, 1, null, "12500")));
+        Collections.swap(commands, 2, 3);
+        assertThat(
+                        transactions
+                                .execute(
+                                        admitted,
+                                        () ->
+                                                executeCommands(commands, admitted)
+                                                        .then(rows("gl_native_posting")))
+                                .block())
+                .isEqualTo(1);
+        try (var c = ownerConnection();
+                var st = c.createStatement();
+                var row =
+                        st.executeQuery(
+                                "SELECT original_request,canonical_intent,request_shape FROM"
+                                        + " gl_native_journal_action WHERE action_id='"
+                                        + effect.action()
+                                        + "'")) {
+            assertThat(row.next()).isTrue();
+            assertThat(row.getString(1)).isEqualTo(effect.originalRequest());
+            assertThat(row.getString(2)).isEqualTo(effect.canonical());
+            assertThat(row.getString(3)).isEqualTo("GL_POSTING_REQUEST_V1");
+        }
+        var rollbackFixture = emptyFixture();
+        var rollbackEffect = scopedEffect(rollbackFixture, false);
+        var rollback = write(rollbackFixture, rollbackEffect, "post");
+        var rollbackCommands =
+                captured(c -> complete(c, rollbackFixture, rollbackEffect, 1, null, "12500"));
+        assertThatThrownBy(
+                        () ->
+                                transactions
+                                        .execute(
+                                                rollback,
+                                                () ->
+                                                        executeCommands(rollbackCommands, rollback)
+                                                                .then(
+                                                                        Mono.error(
+                                                                                new IllegalStateException(
+                                                                                        "Synthetic"
+                                                                                            + " outer"
+                                                                                            + " error"
+                                                                                            + " before"
+                                                                                            + " commit"))))
+                                        .block())
+                .isInstanceOf(IllegalStateException.class);
+        try (var c = ownerConnection()) {
+            for (var table :
+                    List.of(
+                            "gl_native_journal_action",
+                            "gl_native_posting",
+                            "gl_native_entry",
+                            "gl_native_line",
+                            "gl_native_journal_event"))
+                assertThat(count(c, table, rollbackFixture.scope().book())).isZero();
+        }
+    }
+
+    @Test
+    void committedPostingCannotBeExtendedOrMutatedInALaterAuthorizedTransaction() throws Exception {
+        var f = emptyFixture();
+        var effect = scopedEffect(f, false);
+        var admitted = write(f, effect, "post");
+        var commands = captured(c -> complete(c, f, effect, 1, null, "12500"));
+        transactions.execute(admitted, () -> executeCommands(commands, admitted)).block();
+        var extra = captured(c -> line(c, f, effect, "line-3", f.debit(), "DR", "12500"));
+        assertThatThrownBy(
+                        () ->
+                                transactions
+                                        .execute(admitted, () -> executeCommands(extra, admitted))
+                                        .block())
+                .isInstanceOf(org.springframework.dao.DataAccessException.class);
+        var updated =
+                transactions
+                        .execute(
+                                admitted,
+                                () ->
+                                        db.sql(
+                                                        "UPDATE public.gl_native_line SET"
+                                                                + " amount_minor='1' WHERE"
+                                                                + " action_id=:action")
+                                                .bind("action", effect.action())
+                                                .fetch()
+                                                .rowsUpdated())
+                        .block();
+        assertThat(updated).isZero();
+        try (var c = ownerConnection()) {
+            assertThat(count(c, "gl_native_line", f.scope().book())).isEqualTo(2);
+            assertThat(count(c, "gl_native_journal_event", f.scope().book())).isEqualTo(2);
+        }
+    }
+
+    @Test
+    void missingWholeEntriesAndExtraBalancedRowsWithIdenticalTotalsCannotCommit() throws Exception {
+        var missingFixture = emptyFixture();
+        var missing =
+                changedOriginal(
+                        missingFixture,
+                        scopedEffect(missingFixture, false),
+                        body -> {
+                            var entries =
+                                    (com.fasterxml.jackson.databind.node.ArrayNode)
+                                            body.get("entries");
+                            var second =
+                                    (com.fasterxml.jackson.databind.node.ObjectNode)
+                                            entries.get(0).deepCopy();
+                            second.put("entryKey", "entry-2");
+                            entries.add(second);
+                        });
+        var missingAuthority = write(missingFixture, missing, "post");
+        intentRejected(
+                missingFixture,
+                missingAuthority,
+                captured(c -> complete(c, missingFixture, missing, 1, null, "12500")));
+        var extraFixture = emptyFixture();
+        var extra = scopedEffect(extraFixture, false, "2");
+        var extraAuthority = write(extraFixture, extra, "post");
+        var extraCommands =
+                new ArrayList<>(captured(c -> complete(c, extraFixture, extra, 1, null, "1")));
+        extraCommands.addAll(
+                captured(
+                        c -> {
+                            line(c, extraFixture, extra, "line-3", extraFixture.debit(), "DR", "1");
+                            line(
+                                    c,
+                                    extraFixture,
+                                    extra,
+                                    "line-4",
+                                    extraFixture.credit(),
+                                    "CR",
+                                    "1");
+                        }));
+        intentRejected(extraFixture, extraAuthority, extraCommands);
+    }
+
+    @Test
+    void exactSourceClaimCannotBeReusedByAnotherActionEvenWithANewCurrentApproval()
+            throws Exception {
+        var f = emptyFixture();
+        var first = scopedEffect(f, false);
+        var firstAuthority = write(f, first, "post");
+        transactions
+                .execute(
+                        firstAuthority,
+                        () -> executeCommands(capturedUnchecked(f, first), firstAuthority))
+                .block();
+        var json = com.fasterxml.jackson.databind.json.JsonMapper.builder().build();
+        var source = json.readTree(first.originalRequest()).get("source");
+        var next = changedOriginal(f, scopedEffect(f, false), body -> body.set("source", source));
+        assertThat(next.sourceKey()).isEqualTo(first.sourceKey());
+        assertThat(next.canonical()).isNotEqualTo(first.canonical());
+        var current = write(f, next, "post");
+        var commands = captured(c -> complete(c, f, next, 2, null, "12500"));
+        assertThatThrownBy(
+                        () ->
+                                transactions
+                                        .execute(current, () -> executeCommands(commands, current))
+                                        .block())
+                .isInstanceOf(org.springframework.dao.DataIntegrityViolationException.class);
+        try (var c = ownerConnection()) {
+            assertThat(count(c, "gl_native_journal_action", f.scope().book())).isEqualTo(1);
+            assertThat(count(c, "gl_native_posting", f.scope().book())).isEqualTo(1);
+            assertThat(count(c, "gl_native_line", f.scope().book())).isEqualTo(2);
+            assertThat(count(c, "gl_native_journal_event", f.scope().book())).isEqualTo(2);
+        }
+    }
+
+    static List<String> capturedUnchecked(Fixture f, Effect effect) {
+        try {
+            return captured(c -> complete(c, f, effect, 1, null, "12500"));
+        } catch (Exception error) {
+            throw new IllegalStateException("Synthetic fixture capture failed", error);
+        }
+    }
+
+    @Test
+    void maximumFiveHundredLineIntentCommitsExactlyWithinTheBoundedNativeBudget() throws Exception {
+        var f = emptyFixture();
+        var effect =
+                changedOriginal(
+                        f,
+                        scopedEffect(f, false),
+                        body -> {
+                            var lines =
+                                    (com.fasterxml.jackson.databind.node.ArrayNode)
+                                            body.get("entries").get(0).get("lines");
+                            var debit = lines.get(0).deepCopy();
+                            var credit = lines.get(1).deepCopy();
+                            lines.removeAll();
+                            for (int n = 0; n < 500; n++) {
+                                var line =
+                                        (com.fasterxml.jackson.databind.node.ObjectNode)
+                                                (n < 250 ? debit : credit).deepCopy();
+                                line.put("lineKey", String.format(Locale.ROOT, "line-%04d", n));
+                                line.put("amountMinor", "1");
+                                lines.add(line);
+                            }
+                        });
+        var admitted = write(f, effect, "post");
+        var commands =
+                captured(
+                        c -> {
+                            action(c, f, effect, "POST");
+                            posting(c, f, effect, 1, null);
+                            for (int n = 0; n < 500; n++)
+                                line(
+                                        c,
+                                        f,
+                                        effect,
+                                        String.format(Locale.ROOT, "line-%04d", n),
+                                        n < 250 ? f.debit() : f.credit(),
+                                        n < 250 ? "DR" : "CR",
+                                        "1");
+                            event(c, effect, "AUDIT");
+                            event(c, effect, "OUTBOX");
+                        });
+        assertThat(
+                        transactions
+                                .execute(
+                                        admitted,
+                                        () ->
+                                                executeCommands(commands, admitted)
+                                                        .then(rows("gl_native_line")))
+                                .block(Duration.ofSeconds(20)))
+                .isEqualTo(500);
+        try (var c = ownerConnection()) {
+            assertThat(count(c, "gl_native_posting", f.scope().book())).isEqualTo(1);
+            assertThat(count(c, "gl_native_journal_event", f.scope().book())).isEqualTo(2);
+        }
+    }
+
+    @Test
+    void nativeDateMeaningDoesNotDependOnTheSessionDateDisplayStyle() throws Exception {
+        var f = emptyFixture();
+        var effect = scopedEffect(f, false);
+        var admitted = write(f, effect, "post");
+        var commands = new ArrayList<>(captured(c -> complete(c, f, effect, 1, null, "12500")));
+        commands.add(0, "SET LOCAL DateStyle='SQL, DMY'");
+        assertThat(
+                        transactions
+                                .execute(
+                                        admitted,
+                                        () ->
+                                                executeCommands(commands, admitted)
+                                                        .then(rows("gl_native_posting")))
+                                .block())
+                .isEqualTo(1);
     }
 }

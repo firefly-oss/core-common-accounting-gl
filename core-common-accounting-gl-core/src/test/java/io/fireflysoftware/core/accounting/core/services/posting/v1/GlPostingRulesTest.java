@@ -473,6 +473,11 @@ class GlPostingRulesTest {
                 .isEqualTo("4168acd1c4bf1854a35904b25fac238e9a66aeb1a1ab58320540db1386542f20");
         assertThat(actual.economicIntentDigest())
                 .isEqualTo("74a9f8c383584895fe6a72540f2f89b8dae471b978ae7d230689279033b3e23d");
+        assertThat(actual.canonicalEconomicIntent())
+                .startsWith("GL_POSTING_ECONOMIC_INTENT_V1\n")
+                .contains("Golden Ω🙂", "Entry Ω🙂");
+        assertThat(GlPostingRules.digest(actual.canonicalEconomicIntent()))
+                .isEqualTo("74a9f8c383584895fe6a72540f2f89b8dae471b978ae7d230689279033b3e23d");
         assertThat(actual.sourceClaimKey())
                 .isEqualTo("ba1fb6ce46d522e7ab24e09c7aa76dda228349d58eb7f6f00269c1b1b48e1ce7");
     }

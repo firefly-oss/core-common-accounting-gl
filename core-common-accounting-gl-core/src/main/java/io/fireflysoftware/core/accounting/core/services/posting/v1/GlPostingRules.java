@@ -41,6 +41,7 @@ public final class GlPostingRules {
             GlPostingRequest request,
             String canonicalIntent,
             String intentDigest,
+            String canonicalEconomicIntent,
             String economicIntentDigest,
             String sourceClaimKey,
             List<GlCurrencyTotal> totals) {}
@@ -157,6 +158,7 @@ public final class GlPostingRules {
                     frozen,
                     canonical,
                     digest(canonical),
+                    economic,
                     digest(economic),
                     digest(sourceKey),
                     totals.values().stream().map(Amounts::view).toList());
