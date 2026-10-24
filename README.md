@@ -118,7 +118,10 @@ For a project-specific provider, implement the existing typed boundary and selec
 
 ## Configuration and local setup
 
-Runtime configuration sources: [openapi.yml](core-common-accounting-gl-sdk/src/main/resources/api-spec/openapi.yml), [openapi.yml](core-common-accounting-gl-sdk/src/main/resources/openapi.yml), [GeneralLedgerApplication.java](core-common-accounting-gl-web/src/main/java/io/fireflysoftware/core/accounting/web/GeneralLedgerApplication.java), [application.yaml](core-common-accounting-gl-web/src/main/resources/application.yaml).
+Runtime configuration sources: [openapi.yml](core-common-accounting-gl-sdk/src/main/resources/openapi.yml), [GeneralLedgerApplication.java](core-common-accounting-gl-web/src/main/java/io/fireflysoftware/core/accounting/web/GeneralLedgerApplication.java), [application.yaml](core-common-accounting-gl-web/src/main/resources/application.yaml).
+
+The original OpenAPI producer writes the SDK input at `core-common-accounting-gl-sdk/src/main/resources/openapi.yml`. The SDK build derives the packaged `/api-spec/openapi.yml` compatibility resource from that same input during `process-resources`; it is not maintained as a second source specification. Regenerate SDK classes through the configured OpenAPI lifecycle.
+
 
 | Environment variable or property | Declared fallback |
 | --- | --- |
